@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stretch the Air / Photo Booth Filters</title>
+<style>
+  :root {
+    --bar-bg: rgba(15, 17, 25, 0.72);
+    --accent: #5ee0ff;
+    --accent2: #ff5ec6;
+    --text: #eef2f7;
+    --muted: #9aa4b2;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #05060a;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    color: var(--text);
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  #outputCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: #000;
+  }
+  video { display: none; }
+
+  #topBar {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    background: var(--bar-bg);
+    backdrop-filter: blur(10px);
+    padding: 10px;
+    border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    z-index: 20;
+    flex-wrap: wrap;
+    max-width: 92vw;
+    justify-content: center;
+  }
+  .btn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: var(--text);
+    padding: 9px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, transform 0.1s, border-color 0.15s;
+  }
+  .btn:hover { background: rgba(255,255,255,0.14); }
+  .btn:active { transform: scale(0.96); }
+  .btn.active {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #06070a;
+    border-color: transparent;
+    font-weight: 600;
+  }
+  .divider {
+    width: 1px;
+    height: 22px;
+    background: rgba(255,255,255,0.16);
+    margin: 0 2px;
+  }
+  .btn.action {
+    background: rgba(255,255,255,0.10);
+    border-color: rgba(255,255,255,0.2);
+  }
+
+  #statusPill {
+    position: fixed;
+    top: 88px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bar-bg);
+    backdrop-filter: blur(8px);
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 13px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.3);
+  }
+  #statusDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #f5c542;
+    flex: none;
+  }
+  #statusPill.ok #statusDot { background: #4fe07a; }
+  #statusPill.err #statusDot { background: #ff5c5c; }
+  #statusText { color: var(--text); }
+
+  #credit {
+    position: fixed;
+    bottom: 10px;
+    right: 14px;
+    font-size: 11px;
+    color: var(--muted);
+    z-index: 20;
+    letter-spacing: 0.2px;
+  }
+
+  #flash {
+    position: fixed;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 30;
+  }
+  #flash.show {
+    animation: flashAnim 0.3s ease-out;
+  }
+  @keyframes flashAnim {
+    0% { opacity: 0.85; }
+    100% { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="outputCanvas"></canvas>
+</div>
+<video id="inputVideo" autoplay playsinline muted></video>
+<div id="flash"></div>
+
+<div id="topBar">
+  <button class="btn" data-mode="hand">Hand Stretch</button>
+  <button class="btn" data-mode="bulge">Bulge</button>
+  <button class="btn" data-mode="squeeze">Squeeze</button>
+  <button class="btn" data-mode="twirl">Twirl</button>
+  <button class="btn" data-mode="thermal">Thermal</button>
+  <div class="divider"></div>
+  <button class="btn action" id="snapBtn">Snap Photo</button>
+  <button class="btn action" id="resetBtn">Reset Canvas</button>
+</div>
+
+<div id="statusPill">
+  <div id="statusDot"></div>
+  <div id="statusText">Starting camera...</div>
+</div>
+
+<div id="credit">Made by Avery Beuth</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Basic setup ----------
+  const video = document.getElementById("inputVideo");
+  const canvas = document.getElementById("outputCanvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const statusPill = document.getElementById("statusPill");
+  const statusText = document.getElementById("statusText");
+  const flashEl = document.getElementById("flash");
+
+  let currentMode = "hand";
+  let latestHands = null;   // results.multiHandLandmarks
+  let latestFace = null;    // results.multiFaceLandmarks
+  let videoReady = false;
+
+  function setStatus(msg, kind) {
+    statusText.textContent = msg;
+    statusPill.classList.remove("ok", "err");
+    if (kind === "ok") statusPill.classList.add("ok");
+    if (kind === "err") statusPill.classList.add("err");
+  }
+
+  function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    rebuildGrid();
+  }
+  window.addEventListener("resize", resizeCanvas);
+
+  // ---------- Cover-fit mapping (video to canvas, mirrored) ----------
+  let cover = { scale: 1, dx: 0, dy: 0, dWidth: 0, dHeight: 0 };
+
+  function computeCover() {
+    if (!video.videoWidth || !video.videoHeight) return;
+    const scale = Math.max(
+      canvas.width / video.videoWidth,
+      canvas.height / video.videoHeight
+    );
+    const dWidth = video.videoWidth * scale;
+    const dHeight = video.videoHeight * scale;
+    cover.scale = scale;
+    cover.dWidth = dWidth;
+    cover.dHeight = dHeight;
+    cover.dx = (canvas.width - dWidth) / 2;
+    cover.dy = (canvas.height - dHeight) / 2;
+  }
+
+  // Converts a normalized landmark (0..1) to mirrored canvas pixel coords
+  function landmarkToCanvas(lm) {
+    const rawX = lm.x * video.videoWidth * cover.scale + cover.dx;
+    const y = lm.y * video.videoHeight * cover.scale + cover.dy;
+    const mirroredX = canvas.width - rawX;
+    return { x: mirroredX, y: y };
+  }
+
+  function drawMirroredVideo(alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, cover.dx, cover.dy, cover.dWidth, cover.dHeight);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------- Hand Stretch grid ----------
+  let grid = { cols: 18, rows: 11, nodes: [] };
+  const GRAB_RADIUS = 70;
+  const PINCH_ON_RATIO = 0.045;   // fraction of canvas width, pinch engages below this distance
+  const PINCH_OFF_RATIO = 0.06;   // release above this distance (hysteresis)
+  const SPRING_K = 0.14;
+  const DAMPING = 0.78;
+
+  function rebuildGrid() {
+    const nodes = [];
+    const marginX = canvas.width * 0.04;
+    const marginY = canvas.height * 0.04;
+    const usableW = canvas.width - marginX * 2;
+    const usableH = canvas.height - marginY * 2;
+    for (let r = 0; r < grid.rows; r++) {
+      for (let c = 0; c < grid.cols; c++) {
+        const hx = marginX + (usableW * c) / (grid.cols - 1);
+        const hy = marginY + (usableH * r) / (grid.rows - 1);
+        nodes.push({
+          homeX: hx, homeY: hy,
+          x: hx, y: hy,
+          vx: 0, vy: 0,
+          held: false
+        });
+      }
+    }
+    grid.nodes = nodes;
+  }
+
+  function nodeIndex(r, c) { return r * grid.cols + c; }
+
+  // one grab slot per tracked hand
+  const handSlots = [
+    { holding: null, pinching: false },
+    { holding: null, pinching: false }
+  ];
+
+  function updateHandStretch() {
+    // update grab/pinch state from latest hand landmarks
+    const hands = latestHands || [];
+    for (let h = 0; h < 2; h++) {
+      const slot = handSlots[h];
+      const lm = hands[h];
+      if (!lm) {
+        if (slot.holding) slot.holding.held = false;
+        slot.holding = null;
+        slot.pinching = false;
+        continue;
+      }
+      const thumb = landmarkToCanvas(lm[4]);
+      const index = landmarkToCanvas(lm[8]);
+      const dx = thumb.x - index.x;
+      const dy = thumb.y - index.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const onThresh = canvas.width * PINCH_ON_RATIO;
+      const offThresh = canvas.width * PINCH_OFF_RATIO;
+      const pinchPoint = { x: (thumb.x + index.x) / 2, y: (thumb.y + index.y) / 2 };
+
+      if (!slot.pinching && dist < onThresh) {
+        slot.pinching = true;
+        // grab nearest free node within radius
+        let best = null, bestD = GRAB_RADIUS;
+        for (const node of grid.nodes) {
+          if (node.held) continue;
+          const ddx = node.x - pinchPoint.x;
+          const ddy = node.y - pinchPoint.y;
+          const d = Math.sqrt(ddx * ddx + ddy * ddy);
+          if (d < bestD) { bestD = d; best = node; }
+        }
+        if (best) { best.held = true; slot.holding = best; }
+      } else if (slot.pinching && dist > offThresh) {
+        slot.pinching = false;
+        if (slot.holding) slot.holding.held = false;
+        slot.holding = null;
+      }
+
+      if (slot.pinching && slot.holding) {
+        slot.holding.x = pinchPoint.x;
+        slot.holding.y = pinchPoint.y;
+        slot.holding.vx = 0;
+        slot.holding.vy = 0;
+      }
+
+      slot._cursor = pinchPoint;
+      slot._pinchActive = slot.pinching;
+    }
+
+    // physics for free nodes
+    for (const node of grid.nodes) {
+      if (node.held) continue;
+      const fx = (node.homeX - node.x) * SPRING_K;
+      const fy = (node.homeY - node.y) * SPRING_K;
+      node.vx = (node.vx + fx) * DAMPING;
+      node.vy = (node.vy + fy) * DAMPING;
+      node.x += node.vx;
+      node.y += node.vy;
+    }
+  }
+
+  function drawHandStretch() {
+    drawMirroredVideo(0.32);
+    updateHandStretch();
+
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = "rgba(94, 224, 255, 0.55)";
+    ctx.beginPath();
+    for (let r = 0; r < grid.rows; r++) {
+      for (let c = 0; c < grid.cols - 1; c++) {
+        const a = grid.nodes[nodeIndex(r, c)];
+        const b = grid.nodes[nodeIndex(r, c + 1)];
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+      }
+    }
+    for (let c = 0; c < grid.cols; c++) {
+      for (let r = 0; r < grid.rows - 1; r++) {
+        const a = grid.nodes[nodeIndex(r, c)];
+        const b = grid.nodes[nodeIndex(r + 1, c)];
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+      }
+    }
+    ctx.stroke();
+
+    for (const node of grid.nodes) {
+      ctx.beginPath();
+      ctx.fillStyle = node.held ? "rgba(255, 94, 198, 0.9)" : "rgba(94, 224, 255, 0.5)";
+      ctx.arc(node.x, node.y, node.held ? 5 : 2.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    for (const slot of handSlots) {
+      if (!slot._cursor) continue;
+      ctx.beginPath();
+      ctx.strokeStyle = slot._pinchActive ? "#ff5ec6" : "rgba(255,255,255,0.6)";
+      ctx.lineWidth = 2;
+      ctx.arc(slot._cursor.x, slot._cursor.y, slot._pinchActive ? 16 : 22, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    if (!latestHands || latestHands.length === 0) {
+      drawHint("Show one or two hands. Pinch thumb and index finger to grab the grid.");
+    }
+  }
+
+  function drawHint(text) {
+    ctx.save();
+    ctx.font = "14px -apple-system, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.textAlign = "center";
+    ctx.fillText(text, canvas.width / 2, canvas.height - 28);
+    ctx.restore();
+  }
+
+  function resetHandStretch() {
+    for (const slot of handSlots) { slot.holding = null; slot.pinching = false; }
+    rebuildGrid();
+  }
+
+  // ---------- Face filters ----------
+  const FACE_CENTER_IDX = 1;
+  const FACE_TOP_IDX = 10;
+  const FACE_BOTTOM_IDX = 152;
+  const FACE_LEFT_IDX = 234;
+  const FACE_RIGHT_IDX = 454;
+
+  let twirlSpin = 0;
+
+  function getFaceGeometry(lm) {
+    const center = landmarkToCanvas(lm[FACE_CENTER_IDX]);
+    const left = landmarkToCanvas(lm[FACE_LEFT_IDX]);
+    const right = landmarkToCanvas(lm[FACE_RIGHT_IDX]);
+    const top = landmarkToCanvas(lm[FACE_TOP_IDX]);
+    const bottom = landmarkToCanvas(lm[FACE_BOTTOM_IDX]);
+    const widthPx = Math.hypot(right.x - left.x, right.y - left.y);
+    const heightPx = Math.hypot(bottom.x - top.x, bottom.y - top.y);
+    const faceSize = Math.max(widthPx, heightPx);
+    return { center, faceSize };
+  }
+
+  function clampBBox(cx, cy, radius) {
+    let bx = Math.floor(cx - radius);
+    let by = Math.floor(cy - radius);
+    let bw = Math.ceil(radius * 2);
+    let bh = Math.ceil(radius * 2);
+    if (bx < 0) { bw += bx; bx = 0; }
+    if (by < 0) { bh += by; by = 0; }
+    if (bx + bw > canvas.width) bw = canvas.width - bx;
+    if (by + bh > canvas.height) bh = canvas.height - by;
+    bw = Math.max(1, bw);
+    bh = Math.max(1, bh);
+    return { bx, by, bw, bh };
+  }
+
+  function applyGeometricWarp(mode, cx, cy, radius) {
+    const box = clampBBox(cx, cy, radius);
+    const src = ctx.getImageData(box.bx, box.by, box.bw, box.bh);
+    const out = ctx.createImageData(box.bw, box.bh);
+    const sData = src.data;
+    const oData = out.data;
+
+    let power = 1;
+    if (mode === "bulge") power = 0.5;      // magnify near center
+    if (mode === "squeeze") power = 1.9;    // pull inward / dent
+    const twirlAngle = mode === "twirl" ? (Math.PI * 1.15 + Math.sin(twirlSpin) * 0.4) : 0;
+
+    for (let py = 0; py < box.bh; py++) {
+      const oy = box.by + py;
+      for (let px = 0; px < box.bw; px++) {
+        const ox = box.bx + px;
+        const dx = ox - cx;
+        const dy = oy - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        let sx = ox, sy = oy;
+
+        if (dist < radius && dist > 0.0001) {
+          const percent = dist / radius;
+          if (mode === "twirl") {
+            const falloff = 1 - percent;
+            const angle = Math.atan2(dy, dx) + twirlAngle * falloff * falloff;
+            sx = cx + Math.cos(angle) * dist;
+            sy = cy + Math.sin(angle) * dist;
+          } else {
+            const factor = Math.pow(percent, power);
+            const newDist = dist * factor;
+            const angle = Math.atan2(dy, dx);
+            sx = cx + Math.cos(angle) * newDist;
+            sy = cy + Math.sin(angle) * newDist;
+          }
+        }
+
+        const lsx = Math.round(sx - box.bx);
+        const lsy = Math.round(sy - box.by);
+        const outIdx = (py * box.bw + px) * 4;
+
+        if (lsx >= 0 && lsx < box.bw && lsy >= 0 && lsy < box.bh) {
+          const srcIdx = (lsy * box.bw + lsx) * 4;
+          oData[outIdx] = sData[srcIdx];
+          oData[outIdx + 1] = sData[srcIdx + 1];
+          oData[outIdx + 2] = sData[srcIdx + 2];
+          oData[outIdx + 3] = 255;
+        } else {
+          const localIdx = (py * box.bw + px) * 4;
+          oData[outIdx] = sData[localIdx];
+          oData[outIdx + 1] = sData[localIdx + 1];
+          oData[outIdx + 2] = sData[localIdx + 2];
+          oData[outIdx + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(out, box.bx, box.by);
+  }
+
+  function thermalColor(t) {
+    t = Math.min(1, Math.max(0, t));
+    let r, g, b;
+    if (t < 0.35) {
+      const k = t / 0.35;
+      r = 0; g = k * 255; b = 255 * (1 - k);
+    } else if (t < 0.65) {
+      const k = (t - 0.35) / 0.30;
+      r = k * 255; g = 255; b = 0;
+    } else {
+      const k = (t - 0.65) / 0.35;
+      r = 255; g = 255 * (1 - k); b = 0;
+    }
+    return [r, g, b];
+  }
+
+  function applyThermalFilter(cx, cy, radius) {
+    const box = clampBBox(cx, cy, radius * 1.15);
+    const img = ctx.getImageData(box.bx, box.by, box.bw, box.bh);
+    const data = img.data;
+    const featherStart = radius * 0.75;
+
+    for (let py = 0; py < box.bh; py++) {
+      const oy = box.by + py;
+      for (let px = 0; px < box.bw; px++) {
+        const ox = box.bx + px;
+        const dx = ox - cx;
+        const dy = oy - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > radius) continue;
+
+        let alpha = 1;
+        if (dist > featherStart) {
+          alpha = 1 - (dist - featherStart) / (radius - featherStart);
+          alpha = Math.max(0, Math.min(1, alpha));
+        }
+
+        const idx = (py * box.bw + px) * 4;
+        const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        const [tr, tg, tb] = thermalColor(lum);
+
+        data[idx] = r + (Math.min(255, tr * 1.15) - r) * alpha;
+        data[idx + 1] = g + (Math.min(255, tg * 1.15) - g) * alpha;
+        data[idx + 2] = b + (Math.min(255, tb * 1.15) - b) * alpha;
+      }
+    }
+    ctx.putImageData(img, box.bx, box.by);
+  }
+
+  function drawFaceFilterMode(mode) {
+    drawMirroredVideo(1);
+    const faces = latestFace;
+
+    if (!faces || faces.length === 0) {
+      drawHint("Face not detected. Center your face in the frame.");
+      return;
+    }
+
+    const lm = faces[0];
+    const geo = getFaceGeometry(lm);
+    const radius = Math.max(40, geo.faceSize * 0.9);
+
+    if (mode === "thermal") {
+      applyThermalFilter(geo.center.x, geo.center.y, radius);
+    } else {
+      applyGeometricWarp(mode, geo.center.x, geo.center.y, radius);
+    }
+  }
+
+  // ---------- Main render loop ----------
+  function renderLoop() {
+    requestAnimationFrame(renderLoop);
+    if (!videoReady || !video.videoWidth) return;
+    computeCover();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    twirlSpin += 0.02;
+
+    if (currentMode === "hand") {
+      drawHandStretch();
+    } else {
+      drawFaceFilterMode(currentMode);
+    }
+  }
+
+  // ---------- MediaPipe setup ----------
+  const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+  hands.onResults((results) => {
+    latestHands = results.multiHandLandmarks || null;
+  });
+
+  const faceMesh = new FaceMesh({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+  });
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: false,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+  faceMesh.onResults((results) => {
+    latestFace = results.multiFaceLandmarks || null;
+  });
+
+  let camera = null;
+
+  async function startCamera() {
+    setStatus("Requesting camera access...", null);
+    try {
+      camera = new Camera(video, {
+        onFrame: async () => {
+          if (currentMode === "hand") {
+            await hands.send({ image: video });
+          } else {
+            await faceMesh.send({ image: video });
+          }
+        },
+        width: 1280,
+        height: 720
+      });
+      await camera.start();
+      videoReady = true;
+      setStatus("Tracking active", "ok");
+    } catch (err) {
+      setStatus("Camera permission denied or unavailable. Please allow camera access and reload the page.", "err");
+    }
+  }
+
+  // ---------- UI wiring ----------
+  const modeButtons = document.querySelectorAll(".btn[data-mode]");
+  function setActiveButton(mode) {
+    modeButtons.forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.mode === mode);
+    });
+  }
+  modeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      currentMode = btn.dataset.mode;
+      setActiveButton(currentMode);
+      latestHands = null;
+      latestFace = null;
+    });
+  });
+  setActiveButton(currentMode);
+
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    resetHandStretch();
+    twirlSpin = 0;
+  });
+
+  document.getElementById("snapBtn").addEventListener("click", () => {
+    flashEl.classList.remove("show");
+    void flashEl.offsetWidth;
+    flashEl.classList.add("show");
+    const dataUrl = canvas.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = "photo-booth-" + Date.now() + ".png";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  });
+
+  // ---------- Boot ----------
+  resizeCanvas();
+  renderLoop();
+  startCamera();
+})();
+</script>
+</body>
+</html>
